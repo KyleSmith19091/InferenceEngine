@@ -181,6 +181,9 @@ mtl_new_buffer(int length_bytes) {
       return nil;
     }
     id<MTLBuffer> buf = [device newBufferWithLength:length_bytes options:MTLResourceStorageModeShared];
+    // using __bridge_retained to indicate that ownership should be transferred from being reference counted in objective-C to C-runtime where
+    // it needs to be manually release
+    // essentially transferring ownership to caller
     return (__bridge_retained void*)buf;
   }
 }
@@ -204,6 +207,17 @@ mtl_buffer_read(void* buf, void* dst, int length_bytes) {
   if (buf == nil || dst == nil || length_bytes <= 0) return;
   id<MTLBuffer> o = (__bridge id<MTLBuffer>)buf;
   memcpy(dst, o.contents, (size_t)length_bytes);
+}
+
+void
+mtl_buffer_read_at(void* buf, int offset_bytes, void* dst, int length_bytes) {
+  if (buf == nil || dst == nil || length_bytes <= 0) return;
+  id<MTLBuffer> o = (__bridge id<MTLBuffer>)buf;
+  if (offset_bytes < 0) return;
+  size_t off = (size_t)offset_bytes;
+  size_t len = (size_t)length_bytes;
+  if (off + len > o.length) return;
+  memcpy(dst, (void *)((char*)o.contents + off), len);
 }
 
 static void*

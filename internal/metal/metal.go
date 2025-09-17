@@ -10,6 +10,7 @@ package metal
 */
 import "C"
 import (
+	"errors"
 	"fmt"
 	"unsafe"
 )
@@ -121,6 +122,31 @@ func (b *Buffer) Read(dst []byte) error {
 	}
 	C.mtl_buffer_read(b.ptr, unsafe.Pointer(&dst[0]), C.int(len(dst)))
 	return nil
+}
+
+func (b *Buffer) ReadN(start int, numberBytes int) ([]byte, error) {
+	if b == nil {
+		return nil, errors.New("nil buffer")
+	}
+	if start < 0 || start > b.size {
+		return nil, fmt.Errorf("%d out of bounds of buffer with size %d", start, b.size)
+	}
+	if numberBytes < 0 {
+		return nil, fmt.Errorf("negative read length: %d", numberBytes)
+	}
+	if start+numberBytes > b.size {
+		return nil, fmt.Errorf("%d can not read more bytes than in buffer with size %d", start+numberBytes, b.size)
+	}
+	if numberBytes == 0 {
+		return []byte{}, nil
+	}
+
+	// construct destination buffer with size equal to the number of bytes we want to read
+	dst := make([]byte, numberBytes)
+
+	// read starting at the given offset into the dest using C helper
+	C.mtl_buffer_read_at(b.ptr, C.int(start), unsafe.Pointer(&dst[0]), C.int(len(dst)))
+	return dst, nil
 }
 
 // Size returns the buffer length in bytes.

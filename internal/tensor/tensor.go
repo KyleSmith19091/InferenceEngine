@@ -1,12 +1,15 @@
 package tensor
 
 import (
-    "errors"
-    "math"
-    "math/rand"
-    "unsafe"
+	"encoding/binary"
+	"errors"
+	"math"
+	"math/rand"
+	"strconv"
+	"strings"
+	"unsafe"
 
-    "kylesmith19091/fastgo/internal/metal"
+	"kylesmith19091/fastgo/internal/metal"
 )
 
 // DType represents element types supported by the engine.
@@ -98,63 +101,63 @@ func New(dt DType, shape ...int) (*Tensor, error) {
 }
 
 func NewRandom2D(dt DType, rows int, cols int) (*Tensor, error) {
-    if !IsValidShape([]int{rows, cols}) {
-        return nil, errors.New("invalid shape")
-    }
-    numel := Numel([]int{rows, cols})
-    nbytes := BytesFor(dt, numel)
-    mbuf, err := metal.NewBuffer(nbytes)
-    if err != nil {
-        return nil, err
-    }
+	if !IsValidShape([]int{rows, cols}) {
+		return nil, errors.New("invalid shape")
+	}
+	numel := Numel([]int{rows, cols})
+	nbytes := BytesFor(dt, numel)
+	mbuf, err := metal.NewBuffer(nbytes)
+	if err != nil {
+		return nil, err
+	}
 
-    // Initialize with PyTorch-like Kaiming uniform for Linear weights:
-    // bound = 1 / sqrt(fan_in), where fan_in = cols for [rows, cols].
-    bound := float32(1.0 / math.Sqrt(float64(cols)))
-    switch dt {
-    case Float32:
-        data := make([]float32, numel)
-        for i := range data {
-            // Uniform in [-bound, bound]
-            data[i] = (rand.Float32()*2 - 1) * bound
-        }
-        bs := unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*4)
-        if err := mbuf.Write(bs); err != nil {
-            _ = mbuf.Close()
-            return nil, err
-        }
-    case Float16:
-        f := make([]float32, numel)
-        for i := range f {
-            f[i] = (rand.Float32()*2 - 1) * bound
-        }
-        packed := PackFP16(f)
-        if err := mbuf.Write(uint16SliceAsBytes(packed)); err != nil {
-            _ = mbuf.Close()
-            return nil, err
-        }
-    case BFloat16:
-        f := make([]float32, numel)
-        for i := range f {
-            f[i] = (rand.Float32()*2 - 1) * bound
-        }
-        packed := PackBF16(f)
-        if err := mbuf.Write(uint16SliceAsBytes(packed)); err != nil {
-            _ = mbuf.Close()
-            return nil, err
-        }
-    default:
-        // For non-float dtypes, leave contents unspecified.
-    }
+	// Initialize with PyTorch-like Kaiming uniform for Linear weights:
+	// bound = 1 / sqrt(fan_in), where fan_in = cols for [rows, cols].
+	bound := float32(1.0 / math.Sqrt(float64(cols)))
+	switch dt {
+	case Float32:
+		data := make([]float32, numel)
+		for i := range data {
+			// Uniform in [-bound, bound]
+			data[i] = (rand.Float32()*2 - 1) * bound
+		}
+		bs := unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*4)
+		if err := mbuf.Write(bs); err != nil {
+			_ = mbuf.Close()
+			return nil, err
+		}
+	case Float16:
+		f := make([]float32, numel)
+		for i := range f {
+			f[i] = (rand.Float32()*2 - 1) * bound
+		}
+		packed := PackFP16(f)
+		if err := mbuf.Write(uint16SliceAsBytes(packed)); err != nil {
+			_ = mbuf.Close()
+			return nil, err
+		}
+	case BFloat16:
+		f := make([]float32, numel)
+		for i := range f {
+			f[i] = (rand.Float32()*2 - 1) * bound
+		}
+		packed := PackBF16(f)
+		if err := mbuf.Write(uint16SliceAsBytes(packed)); err != nil {
+			_ = mbuf.Close()
+			return nil, err
+		}
+	default:
+		// For non-float dtypes, leave contents unspecified.
+	}
 
-    return &Tensor{
-        DT:      dt,
-        Shape:   []int{rows, cols},
-        Strides: DefaultStridesBytes(dt, []int{rows, cols}),
-        Offset:  0,
-        buf:     mbuf,
-        own:     true,
-    }, nil
+	return &Tensor{
+		DT:      dt,
+		Shape:   []int{rows, cols},
+		Strides: DefaultStridesBytes(dt, []int{rows, cols}),
+		Offset:  0,
+		buf:     mbuf,
+		own:     true,
+	}, nil
 }
 
 // FromFloat32 packs and uploads float32 data into a new device tensor.
@@ -197,6 +200,298 @@ func (t *Tensor) Numel() int { return Numel(t.Shape) }
 func (t *Tensor) ByteSize() int { return BytesFor(t.DT, t.Numel()) }
 
 func (t *Tensor) Buffer() *metal.Buffer { return t.buf }
+
+// At returns the value at the provided multi-dimensional index as float32.
+// For integer tensors, the value is converted to float32.
+// For Int4 tensors, only contiguous tensors are supported.
+func (t *Tensor) At(idxs ...int) (float32, error) {
+	if t == nil || t.buf == nil {
+		return 0, errors.New("nil tensor")
+	}
+	if len(idxs) != len(t.Shape) {
+		return 0, errors.New("index rank mismatch")
+	}
+	for d, v := range idxs {
+		if v < 0 || v >= t.Shape[d] {
+			return 0, errors.New("index out of bounds")
+		}
+	}
+	switch t.DT {
+	case Float32:
+		off := t.byteOffsetForIndices(idxs)
+		bs, err := t.buf.ReadN(off, 4)
+		if err != nil || len(bs) < 4 {
+			return 0, err
+		}
+		u := binary.LittleEndian.Uint32(bs)
+		return math.Float32frombits(u), nil
+	case Float16:
+		off := t.byteOffsetForIndices(idxs)
+		bs, err := t.buf.ReadN(off, 2)
+		if err != nil || len(bs) < 2 {
+			return 0, err
+		}
+		u := binary.LittleEndian.Uint16(bs)
+		return float16BitsToFloat32(u), nil
+	case BFloat16:
+		off := t.byteOffsetForIndices(idxs)
+		bs, err := t.buf.ReadN(off, 2)
+		if err != nil || len(bs) < 2 {
+			return 0, err
+		}
+		u := binary.LittleEndian.Uint16(bs)
+		return math.Float32frombits(uint32(u) << 16), nil
+	case Int8:
+		off := t.byteOffsetForIndices(idxs)
+		bs, err := t.buf.ReadN(off, 1)
+		if err != nil || len(bs) < 1 {
+			return 0, err
+		}
+		return float32(int8(bs[0])), nil
+	case Int4:
+		if !t.Contiguous() {
+			return 0, errors.New("int4 At unsupported for non-contiguous tensor")
+		}
+		li, err := t.flatIndex(idxs)
+		if err != nil {
+			return 0, err
+		}
+		boff := t.Offset + (li / 2)
+		bs, err := t.buf.ReadN(boff, 1)
+		if err != nil || len(bs) < 1 {
+			return 0, err
+		}
+		b := bs[0]
+		var nibble byte
+		if li%2 == 0 {
+			nibble = b & 0x0F
+		} else {
+			nibble = (b >> 4) & 0x0F
+		}
+		v := int8(nibble<<4) >> 4 // sign-extend 4-bit
+		return float32(v), nil
+	default:
+		return 0, errors.New("unsupported dtype for At")
+	}
+}
+
+// Select returns a view by fixing the index at the given dimension.
+// The resulting tensor has rank-1 with that dimension removed.
+func (t *Tensor) Select(dim int, index int) (*Tensor, error) {
+	if t == nil || t.buf == nil {
+		return nil, errors.New("nil tensor")
+	}
+	if dim < 0 || dim >= len(t.Shape) {
+		return nil, errors.New("dim out of range")
+	}
+	if index < 0 || index >= t.Shape[dim] {
+		return nil, errors.New("index out of bounds")
+	}
+	off := t.Offset + index*t.Strides[dim]
+	newShape := append([]int{}, t.Shape[:dim]...)
+	newShape = append(newShape, t.Shape[dim+1:]...)
+	newStrides := append([]int{}, t.Strides[:dim]...)
+	newStrides = append(newStrides, t.Strides[dim+1:]...)
+	return t.View(off, newShape, newStrides)
+}
+
+// Row is a convenience for Select(0, i) on 2D matrices (e.g., embeddings).
+func (t *Tensor) Row(i int) (*Tensor, error) {
+	return t.Select(0, i)
+}
+
+// flatIndex computes the row-major linear element index for the given indices.
+func (t *Tensor) flatIndex(idxs []int) (int, error) {
+	if len(idxs) != len(t.Shape) {
+		return 0, errors.New("index rank mismatch")
+	}
+	for d, v := range idxs {
+		if v < 0 || v >= t.Shape[d] {
+			return 0, errors.New("index out of bounds")
+		}
+	}
+	li := 0
+	for d := 0; d < len(t.Shape); d++ {
+		li = li*t.Shape[d] + idxs[d]
+	}
+	return li, nil
+}
+
+// byteOffsetForIndices computes buffer byte offset for a multidimensional index
+// using the tensor's strides and offset. Not valid for Int4 nibble granularity.
+func (t *Tensor) byteOffsetForIndices(idxs []int) int {
+	off := t.Offset
+	for d := 0; d < len(t.Shape); d++ {
+		off += idxs[d] * t.Strides[d]
+	}
+	return off
+}
+
+func (t *Tensor) String() string {
+	if t == nil {
+		return "<nil Tensor>"
+	}
+	var sb strings.Builder
+	sb.WriteString("Tensor(")
+	sb.WriteString(t.DT.String())
+	sb.WriteString(", shape=[")
+	for i, d := range t.Shape {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(strconv.Itoa(d))
+	}
+	sb.WriteString("]")
+	sb.WriteString(", strides=[")
+	for i, s := range t.Strides {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteString(strconv.Itoa(s))
+	}
+	sb.WriteString("]")
+	if t.Offset != 0 {
+		sb.WriteString(", offset=")
+		sb.WriteString(strconv.Itoa(t.Offset))
+	} else {
+		sb.WriteString(", offset=0")
+	}
+	sb.WriteString(", contiguous=")
+	if t.Contiguous() {
+		sb.WriteString("true")
+	} else {
+		sb.WriteString("false")
+	}
+	sb.WriteString(", numel=")
+	sb.WriteString(strconv.Itoa(t.Numel()))
+	sb.WriteString(", bytes=")
+	sb.WriteString(strconv.Itoa(t.ByteSize()))
+
+	// Attempt to pretty-print values according to dtype.
+	sb.WriteString(", values=[")
+	switch t.DT {
+	case Float32:
+		for i := 0; i < t.Numel(); i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			off := t.byteOffsetForFlatIndex(i)
+			bs, err := t.buf.ReadN(off, 4)
+			if err != nil || len(bs) < 4 {
+				sb.WriteString("<read error>")
+				break
+			}
+			u := binary.LittleEndian.Uint32(bs)
+			f := math.Float32frombits(u)
+			sb.WriteString(strconv.FormatFloat(float64(f), 'g', 6, 32))
+		}
+	case Float16:
+		for i := 0; i < t.Numel(); i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			off := t.byteOffsetForFlatIndex(i)
+			bs, err := t.buf.ReadN(off, 2)
+			if err != nil || len(bs) < 2 {
+				sb.WriteString("<read error>")
+				break
+			}
+			u := binary.LittleEndian.Uint16(bs)
+			f := float16BitsToFloat32(u)
+			sb.WriteString(strconv.FormatFloat(float64(f), 'g', 6, 32))
+		}
+	case BFloat16:
+		for i := 0; i < t.Numel(); i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			off := t.byteOffsetForFlatIndex(i)
+			bs, err := t.buf.ReadN(off, 2)
+			if err != nil || len(bs) < 2 {
+				sb.WriteString("<read error>")
+				break
+			}
+			u := binary.LittleEndian.Uint16(bs)
+			f := math.Float32frombits(uint32(u) << 16)
+			sb.WriteString(strconv.FormatFloat(float64(f), 'g', 6, 32))
+		}
+	case Int8:
+		for i := 0; i < t.Numel(); i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			off := t.byteOffsetForFlatIndex(i)
+			bs, err := t.buf.ReadN(off, 1)
+			if err != nil || len(bs) < 1 {
+				sb.WriteString("<read error>")
+				break
+			}
+			v := int8(bs[0])
+			sb.WriteString(strconv.Itoa(int(v)))
+		}
+	case Int4:
+		// Only support contiguous views for compact 4-bit printing.
+		if !t.Contiguous() {
+			sb.WriteString("<int4 non-contiguous view unsupported>")
+			break
+		}
+		// Read packed bytes for all elements and unpack nibbles (lo, hi).
+		n := t.Numel()
+		bcnt := BytesFor(Int4, n)
+		if bcnt == 0 {
+			// empty
+			break
+		}
+		bs, err := t.buf.ReadN(t.Offset, bcnt)
+		if err != nil || len(bs) < bcnt {
+			sb.WriteString("<read error>")
+			break
+		}
+		for i := 0; i < n; i++ {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			b := bs[i/2]
+			var nibble byte
+			if i%2 == 0 {
+				nibble = b & 0x0F
+			} else {
+				nibble = (b >> 4) & 0x0F
+			}
+			// Sign-extend 4-bit two's complement to int8
+			v := int8(nibble<<4) >> 4
+			sb.WriteString(strconv.Itoa(int(v)))
+		}
+	default:
+		sb.WriteString("<unknown dtype>")
+	}
+	sb.WriteString("]")
+	sb.WriteByte(')')
+	return sb.String()
+}
+
+// byteOffsetForFlatIndex computes the byte offset into the underlying buffer
+// for a given flat element index respecting the tensor's shape/strides/offset.
+func (t *Tensor) byteOffsetForFlatIndex(i int) int {
+	if len(t.Shape) == 0 {
+		return t.Offset
+	}
+	// Convert flat index to multi-dimensional indices (row-major).
+	idx := make([]int, len(t.Shape))
+	rem := i
+	for d := len(t.Shape) - 1; d >= 0; d-- {
+		dim := t.Shape[d]
+		if dim > 0 {
+			idx[d] = rem % dim
+			rem /= dim
+		}
+	}
+	off := t.Offset
+	for d := 0; d < len(t.Shape); d++ {
+		off += idx[d] * t.Strides[d]
+	}
+	return off
+}
 
 // Close releases the underlying buffer if owned.
 func (t *Tensor) Close() error {

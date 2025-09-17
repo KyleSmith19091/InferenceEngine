@@ -22,6 +22,8 @@ void* mtl_new_buffer(int length_bytes);
 void  mtl_release_buffer(void* buf);
 void  mtl_buffer_write(void* buf, void* src, int length_bytes);
 void  mtl_buffer_read(void* buf, void* dst, int length_bytes);
+// Read from buffer starting at byte offset into dst for length_bytes.
+void  mtl_buffer_read_at(void* buf, int offset_bytes, void* dst, int length_bytes);
 
 // Kernel invocation using provided buffers
 void* metal_mult_naive_with_buffers(MatrixParams *params, void* bufA, void* bufB, void* bufC);

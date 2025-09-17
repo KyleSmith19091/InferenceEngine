@@ -1,47 +1,29 @@
+// fastgo is a tiny example CLI that demonstrates
+// basic usage of the internal tensor package.
+// On macOS with cgo enabled it can exercise the
+// Metal-backed implementation; otherwise stubs are used.
 package main
 
 import (
 	"fmt"
-	"kylesmith19091/fastgo/internal/metal"
 	"kylesmith19091/fastgo/internal/tensor"
 )
 
 func main() {
-	// compile kernel
-	metal.CompileDefault("matrix_multiply_naive")
-
-	// allocate tensors on device and upload
+	// Allocate a 3x3 Float32 tensor filled with random values.
+	// Depending on build tags and platform, this may be backed by
+	// GPU resources (Metal) or a CPU-only stub for portability.
 	tA, err := tensor.NewRandom2D(tensor.Float32, 3, 3)
 	if err != nil {
+		// Propagate any allocation/initialization errors to the user.
 		fmt.Println("tA error:", err)
 		return
 	}
+	// Always release any underlying resources when done (GPU buffers, etc.).
 	defer tA.Close()
 
-	tB, err := tensor.NewRandom2D(tensor.Float32, 3, 3)
-	if err != nil {
-		fmt.Println("tB error:", err)
-		return
-	}
-	defer tB.Close()
+	// Placeholder print to show the program ran; replace with real ops
+	// (e.g., matmul, activation) or pretty-printing the tensor as needed.
+	fmt.Printf("%v\n", tA.String())
 
-	tC, err := tensor.New(tensor.Float32, 3, 3)
-	if err != nil {
-		fmt.Println("tC error:", err)
-		return
-	}
-	defer tC.Close()
-
-	// execute using tensor buffers
-	if err := metal.MultiplyNaiveBuffers(tA.Buffer(), tB.Buffer(), tC.Buffer(), 3, 3, 3, 3); err != nil {
-		fmt.Println("kernel error:", err)
-		return
-	}
-	C := make([]float32, 3*3)
-	if err := tC.DownloadFloat32(C); err != nil {
-		fmt.Println("download error:", err)
-		return
-	}
-
-	fmt.Printf("%v\n", C)
 }
