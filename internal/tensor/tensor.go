@@ -1,11 +1,12 @@
 package tensor
 
 import (
-	"errors"
-	"math"
-	"unsafe"
+    "errors"
+    "math"
+    "math/rand"
+    "unsafe"
 
-	"kylesmith19091/fastgo/internal/metal"
+    "kylesmith19091/fastgo/internal/metal"
 )
 
 // DType represents element types supported by the engine.
@@ -86,7 +87,74 @@ func New(dt DType, shape ...int) (*Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Tensor{DT: dt, Shape: append([]int(nil), shape...), Strides: DefaultStridesBytes(dt, shape), Offset: 0, buf: mbuf, own: true}, nil
+	return &Tensor{
+		DT:      dt,
+		Shape:   append([]int(nil), shape...),
+		Strides: DefaultStridesBytes(dt, shape),
+		Offset:  0,
+		buf:     mbuf,
+		own:     true,
+	}, nil
+}
+
+func NewRandom2D(dt DType, rows int, cols int) (*Tensor, error) {
+    if !IsValidShape([]int{rows, cols}) {
+        return nil, errors.New("invalid shape")
+    }
+    numel := Numel([]int{rows, cols})
+    nbytes := BytesFor(dt, numel)
+    mbuf, err := metal.NewBuffer(nbytes)
+    if err != nil {
+        return nil, err
+    }
+
+    // Initialize with PyTorch-like Kaiming uniform for Linear weights:
+    // bound = 1 / sqrt(fan_in), where fan_in = cols for [rows, cols].
+    bound := float32(1.0 / math.Sqrt(float64(cols)))
+    switch dt {
+    case Float32:
+        data := make([]float32, numel)
+        for i := range data {
+            // Uniform in [-bound, bound]
+            data[i] = (rand.Float32()*2 - 1) * bound
+        }
+        bs := unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*4)
+        if err := mbuf.Write(bs); err != nil {
+            _ = mbuf.Close()
+            return nil, err
+        }
+    case Float16:
+        f := make([]float32, numel)
+        for i := range f {
+            f[i] = (rand.Float32()*2 - 1) * bound
+        }
+        packed := PackFP16(f)
+        if err := mbuf.Write(uint16SliceAsBytes(packed)); err != nil {
+            _ = mbuf.Close()
+            return nil, err
+        }
+    case BFloat16:
+        f := make([]float32, numel)
+        for i := range f {
+            f[i] = (rand.Float32()*2 - 1) * bound
+        }
+        packed := PackBF16(f)
+        if err := mbuf.Write(uint16SliceAsBytes(packed)); err != nil {
+            _ = mbuf.Close()
+            return nil, err
+        }
+    default:
+        // For non-float dtypes, leave contents unspecified.
+    }
+
+    return &Tensor{
+        DT:      dt,
+        Shape:   []int{rows, cols},
+        Strides: DefaultStridesBytes(dt, []int{rows, cols}),
+        Offset:  0,
+        buf:     mbuf,
+        own:     true,
+    }, nil
 }
 
 // FromFloat32 packs and uploads float32 data into a new device tensor.
