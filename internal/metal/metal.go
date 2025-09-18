@@ -64,25 +64,6 @@ func InitializeBuffersFloat32(a, b []float32, aRows, aCols, bRows, bCols int) (i
 	return outCount, nil
 }
 
-// MultiplyNaive runs the naive Metal kernel and returns a copy of the result.
-func MultiplyNaive(aRows, aCols, bRows, bCols int) []float32 {
-	params := C.MatrixParams{
-		a_rows: C.int(aRows),
-		a_cols: C.int(aCols),
-		b_rows: C.int(bRows),
-		b_cols: C.int(bCols),
-	}
-	p := C.metal_mult_naive(&params)
-	if p == nil {
-		return nil
-	}
-	n := aRows * bCols
-	tmp := unsafe.Slice((*float32)(p), n)
-	res := make([]float32, n)
-	copy(res, tmp)
-	return res
-}
-
 // Buffer is a thin wrapper over an MTLBuffer for tensor storage.
 type Buffer struct {
 	ptr  unsafe.Pointer
@@ -195,4 +176,60 @@ func MultiplyNaiveBuffers(a, b, c *Buffer, aRows, aCols, bRows, bCols int) error
 	params := C.MatrixParams{a_rows: C.int(aRows), a_cols: C.int(aCols), b_rows: C.int(bRows), b_cols: C.int(bCols)}
 	_ = C.metal_mult_naive_with_buffers(&params, a.ptr, b.ptr, c.ptr)
 	return nil
+}
+
+// -------- Generic multi-kernel helpers --------
+
+// EnsureKernel compiles and caches a pipeline for the given kernel name using the current library.
+func EnsureKernel(kernelName string) {
+	c := C.CString(kernelName)
+	defer C.free(unsafe.Pointer(c))
+	C.ensurePipelineFor(c)
+}
+
+// RunKernel3 runs a named kernel with raw params pointer and three buffers, over a 3D grid.
+// paramsPtr may be nil if the kernel takes no params.
+func RunKernel3(kernelName string, paramsPtr unsafe.Pointer, paramsLen int, gridX, gridY, gridZ int, b0, b1, b2 *Buffer) error {
+	cname := C.CString(kernelName)
+	defer C.free(unsafe.Pointer(cname))
+	var p0, p1, p2 unsafe.Pointer
+	if b0 != nil { p0 = b0.ptr }
+	if b1 != nil { p1 = b1.ptr }
+	if b2 != nil { p2 = b2.ptr }
+	_ = C.mtl_run_kernel_named_3(
+		cname,
+		paramsPtr,
+		C.int(paramsLen),
+		p0,
+		p1,
+		p2,
+		C.int(gridX), C.int(gridY), C.int(gridZ),
+	)
+	return nil
+}
+
+// MatMul3DParams mirrors MatMul3DParams in mm.metal for batched matmul.
+type MatMul3DParams struct {
+	Batch int32
+	M     int32
+	K     int32
+	N     int32
+}
+
+// MatMulBatchedBuffers runs matrix_multiply_batched_naive on [B,M,K]x[B,K,N]->[B,M,N].
+func MatMulBatchedBuffers(a, b, c *Buffer, batch, m, k, n int) error {
+	if a == nil || b == nil || c == nil {
+		return fmt.Errorf("nil buffer")
+	}
+	if k <= 0 || m <= 0 || n <= 0 || batch <= 0 {
+		return fmt.Errorf("invalid dims")
+	}
+	params := MatMul3DParams{Batch: int32(batch), M: int32(m), K: int32(k), N: int32(n)}
+	// grid = (n, m, batch)
+	return RunKernel3(
+		"matrix_multiply_batched_naive",
+		unsafe.Pointer(&params), int(unsafe.Sizeof(params)),
+		n, m, batch,
+		a, b, c,
+	)
 }

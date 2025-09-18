@@ -160,6 +160,65 @@ func NewRandom2D(dt DType, rows int, cols int) (*Tensor, error) {
 	}, nil
 }
 
+func NewRandom3D(dt DType, dim0 int, dim1 int, dim2 int) (*Tensor, error) {
+	shape := []int{dim0, dim1, dim2}
+	if !IsValidShape(shape) {
+		return nil, errors.New("invalid shape")
+	}
+	numel := Numel(shape)
+	nbytes := BytesFor(dt, numel)
+	mbuf, err := metal.NewBuffer(nbytes)
+	if err != nil {
+		return nil, err
+	}
+
+	// Use the last dimension as fan-in to match linear weight initialization.
+	bound := float32(1.0 / math.Sqrt(float64(dim2)))
+	switch dt {
+	case Float32:
+		data := make([]float32, numel)
+		for i := range data {
+			data[i] = (rand.Float32()*2 - 1) * bound
+		}
+		bs := unsafe.Slice((*byte)(unsafe.Pointer(&data[0])), len(data)*4)
+		if err := mbuf.Write(bs); err != nil {
+			_ = mbuf.Close()
+			return nil, err
+		}
+	case Float16:
+		f := make([]float32, numel)
+		for i := range f {
+			f[i] = (rand.Float32()*2 - 1) * bound
+		}
+		packed := PackFP16(f)
+		if err := mbuf.Write(uint16SliceAsBytes(packed)); err != nil {
+			_ = mbuf.Close()
+			return nil, err
+		}
+	case BFloat16:
+		f := make([]float32, numel)
+		for i := range f {
+			f[i] = (rand.Float32()*2 - 1) * bound
+		}
+		packed := PackBF16(f)
+		if err := mbuf.Write(uint16SliceAsBytes(packed)); err != nil {
+			_ = mbuf.Close()
+			return nil, err
+		}
+	default:
+		// For non-float dtypes, leave contents unspecified.
+	}
+
+	return &Tensor{
+		DT:      dt,
+		Shape:   shape,
+		Strides: DefaultStridesBytes(dt, shape),
+		Offset:  0,
+		buf:     mbuf,
+		own:     true,
+	}, nil
+}
+
 // FromFloat32 packs and uploads float32 data into a new device tensor.
 func FromFloat32(dt DType, data []float32, shape ...int) (*Tensor, error) {
 	t, err := New(dt, shape...)

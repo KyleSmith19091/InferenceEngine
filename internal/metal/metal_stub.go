@@ -11,6 +11,13 @@ type MatrixParams struct {
 	b_rows, b_cols int32
 }
 
+type MatMul3DParams struct {
+	Batch int32
+	M     int32
+	K     int32
+	N     int32
+}
+
 func initializePipelineAndCommandQueue(_ *byte)                                           {}
 func initializeMTLBuffers(_ unsafe.Pointer, _ unsafe.Pointer, _ int, _ int, _ int, _ int) {}
 func metal_mult_naive(_ *MatrixParams) unsafe.Pointer                                     { return nil }
@@ -58,3 +65,4 @@ func EnsureKernel(_ string) {}
 func RunKernel3(_ string, _ unsafe.Pointer, _ int, _ int, _ int, _ int, _ *Buffer, _ *Buffer, _ *Buffer) error {
 	return nil
 }
+func MatMulBatchedBuffers(_ *Buffer, _ *Buffer, _ *Buffer, _ int, _ int, _ int, _ int) error { return nil }
