@@ -31,6 +31,12 @@ type Buffer struct {
 func NewBuffer(size int) (*Buffer, error) { return &Buffer{ptr: nil, size: size}, nil }
 func (b *Buffer) Write(_ []byte) error    { return nil }
 func (b *Buffer) Read(_ []byte) error     { return nil }
+func (b *Buffer) ReadN(_ int, numberBytes int) ([]byte, error) {
+	if numberBytes <= 0 {
+		return []byte{}, nil
+	}
+	return make([]byte, numberBytes), nil
+}
 func (b *Buffer) Size() int {
 	if b == nil {
 		return 0
@@ -45,6 +51,10 @@ func (b *Buffer) Ptr() unsafe.Pointer {
 }
 func (b *Buffer) Close() error { return nil }
 
-func MultiplyNaiveBuffers(_ *Buffer, _ *Buffer, _ *Buffer, _ int, _ int, _ int, _ int) error {
+func MultiplyNaiveBuffers(_ *Buffer, _ *Buffer, _ *Buffer, _ int, _ int, _ int, _ int) error { return nil }
+
+// New multi-kernel generic API stubs
+func EnsureKernel(_ string) {}
+func RunKernel3(_ string, _ unsafe.Pointer, _ int, _ int, _ int, _ int, _ *Buffer, _ *Buffer, _ *Buffer) error {
 	return nil
 }

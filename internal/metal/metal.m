@@ -19,6 +19,10 @@ id<MTLBuffer> bufferA;
 id<MTLBuffer> bufferB;
 id<MTLBuffer> bufferC;
 
+// Global library and pipeline registry for multi-kernel support
+static id<MTLLibrary> gLibrary;
+static NSMutableDictionary<NSString*, id<MTLComputePipelineState>> *pipelineMap;
+
 /**
  * Compiles and creates the Metal shader library used later on to execute commands on the GPU.
  * Initializes the pipeline state objects for the relevant public functions defined in the 
@@ -37,37 +41,87 @@ initializePipelineAndCommandQueue (char *source_path, char* kernel_name)
   compileOptions.languageVersion = MTLLanguageVersion2_4;
   NSString *ss = [NSString stringWithUTF8String:source_path];
 
-  id<MTLLibrary> lib = [device newLibraryWithSource:ss
+  gLibrary = [device newLibraryWithSource:ss
     options:compileOptions
     error:&error];
-
-  if (lib == nil) {
+ 
+  if (gLibrary == nil) {
     NSLog(@"Failed to create library, error %@.", error);
     return;
   }
-
-  // Create a representation of the naive multiplication public shader function in 
-  // the Metal library created above
-  NSString *kernel = [NSString stringWithUTF8String:kernel_name];
-  id<MTLFunction> naiveFunction =
-      [lib newFunctionWithName:kernel];
-  if (naiveFunction == nil) {
-    NSLog(@"Failed to find the matrix_multiply_naive function.");
-    return;
+  
+  // Initialize registry and queue
+  if (!pipelineMap) {
+    pipelineMap = [NSMutableDictionary new];
+  } else {
+    [pipelineMap removeAllObjects];
   }
-
-  pipelineStateNaive = [device newComputePipelineStateWithFunction:naiveFunction
-    error:&error];
-  if (pipelineStateNaive == nil) {
-    NSLog(@"Failed to create naive pipeline state object, error %@.", error);
-    return;
-  }
-
-
   commandQueue = [device newCommandQueue];
   if (commandQueue == nil) {
     NSLog(@"Failed to find the command queue.");
     return;
+  }
+  
+  // Ensure the requested kernel is compiled and set back-compat pipeline handle
+  NSString *kernel = [NSString stringWithUTF8String:kernel_name];
+  NSError *perr = nil;
+  id<MTLFunction> fn = [gLibrary newFunctionWithName:kernel];
+  if (fn == nil) {
+    NSLog(@"Failed to find kernel function '%@' in library.", kernel);
+    return;
+  }
+  id<MTLComputePipelineState> p = [device newComputePipelineStateWithFunction:fn error:&perr];
+  if (p == nil) {
+    NSLog(@"Failed to create pipeline for '%@': %@", kernel, perr);
+    return;
+  }
+  pipelineMap[kernel] = p;
+  if ([kernel isEqualToString:@"matrix_multiply_naive"]) {
+    pipelineStateNaive = p;
+  }
+}
+
+// Generic: initialize library and command queue only
+void initializeLibrary(char *source_path) {
+  device = MTLCreateSystemDefaultDevice();
+  NSLog(@"Using default device %s", [device.name UTF8String]);
+  NSError *error = nil;
+  MTLCompileOptions *compileOptions = [MTLCompileOptions new];
+  compileOptions.languageVersion = MTLLanguageVersion2_4;
+  NSString *ss = [NSString stringWithUTF8String:source_path];
+  gLibrary = [device newLibraryWithSource:ss options:compileOptions error:&error];
+  if (gLibrary == nil) {
+    NSLog(@"Failed to create library, error %@.", error);
+    return;
+  }
+  if (!pipelineMap) pipelineMap = [NSMutableDictionary new];
+  [pipelineMap removeAllObjects];
+  commandQueue = [device newCommandQueue];
+  if (commandQueue == nil) {
+    NSLog(@"Failed to find the command queue.");
+  }
+}
+
+// Generic: ensure a pipeline exists for the given function name
+void ensurePipelineFor(char* kernel_name) {
+  if (gLibrary == nil || device == nil) return;
+  NSString *k = [NSString stringWithUTF8String:kernel_name];
+  id<MTLComputePipelineState> p = pipelineMap[k];
+  if (p != nil) return;
+  NSError *perr = nil;
+  id<MTLFunction> fn = [gLibrary newFunctionWithName:k];
+  if (fn == nil) {
+    NSLog(@"Failed to find kernel function '%@' in library.", k);
+    return;
+  }
+  p = [device newComputePipelineStateWithFunction:fn error:&perr];
+  if (p == nil) {
+    NSLog(@"Failed to create pipeline for '%@': %@", k, perr);
+    return;
+  }
+  pipelineMap[k] = p;
+  if ([k isEqualToString:@"matrix_multiply_naive"]) {
+    pipelineStateNaive = p;
   }
 }
 
@@ -122,7 +176,8 @@ metal_mult (MatrixParams *params, id<MTLComputePipelineState> pipelineState)
     [computeEncoder setComputePipelineState:pipelineState];
 
     // Indicates the dimensionality of the input matrix to the thread scheduler
-    MTLSize threadsPerGrid = MTLSizeMake(params->a_cols, params->a_rows, 1);
+    // grid = (b_cols, a_rows, 1)
+    MTLSize threadsPerGrid = MTLSizeMake(params->b_cols, params->a_rows, 1);
 
     // Calculate a threadgroup size.
     // https://developer.apple.com/documentation/metal/calculating_threadgroup_and_grid_sizes?language=objc
@@ -231,7 +286,8 @@ metal_mult_with_buffers(MatrixParams *params, id<MTLComputePipelineState> pipeli
     id<MTLComputeCommandEncoder> computeEncoder = [commandBuffer computeCommandEncoder];
     if (computeEncoder == nil) return nil;
     [computeEncoder setComputePipelineState:pipelineState];
-    MTLSize threadsPerGrid = MTLSizeMake(params->a_cols, params->a_rows, 1);
+    // grid = (b_cols, a_rows, 1)
+    MTLSize threadsPerGrid = MTLSizeMake(params->b_cols, params->a_rows, 1);
     NSUInteger w = pipelineState.threadExecutionWidth;
     NSUInteger h = pipelineState.maxTotalThreadsPerThreadgroup / w;
     MTLSize threadsPerThreadgroup = MTLSizeMake(w, h, 1);
@@ -255,4 +311,66 @@ metal_mult_naive_with_buffers(MatrixParams *params, void* bufA, void* bufB, void
   id<MTLBuffer> b = (__bridge id<MTLBuffer>)bufB;
   id<MTLBuffer> c = (__bridge id<MTLBuffer>)bufC;
   return metal_mult_with_buffers(params, pipelineStateNaive, a, b, c);
+}
+
+// Generic named-kernel runner for up to 3 buffers and explicit grid
+void*
+mtl_run_kernel_named_3(
+  char* kernel_name,
+  void* params,
+  int params_len,
+  void* buf0,
+  void* buf1,
+  void* buf2,
+  int gridX,
+  int gridY,
+  int gridZ
+) {
+  @autoreleasepool {
+    ensureDeviceAndQueue();
+    if (device == nil || commandQueue == nil || gLibrary == nil) return nil;
+    NSString *k = [NSString stringWithUTF8String:kernel_name];
+    id<MTLComputePipelineState> p = pipelineMap[k];
+    if (p == nil) {
+      // compile on-demand
+      NSError *perr = nil;
+      id<MTLFunction> fn = [gLibrary newFunctionWithName:k];
+      if (fn == nil) {
+        NSLog(@"Kernel '%@' not found.", k);
+        return nil;
+      }
+      p = [device newComputePipelineStateWithFunction:fn error:&perr];
+      if (p == nil) {
+        NSLog(@"Failed to create pipeline for '%@': %@", k, perr);
+        return nil;
+      }
+      pipelineMap[k] = p;
+    }
+    id<MTLCommandBuffer> commandBuffer = [commandQueue commandBuffer];
+    if (commandBuffer == nil) return nil;
+    id<MTLComputeCommandEncoder> computeEncoder = [commandBuffer computeCommandEncoder];
+    if (computeEncoder == nil) return nil;
+    [computeEncoder setComputePipelineState:p];
+    if (params != nil && params_len > 0) {
+      [computeEncoder setBytes:params length:params_len atIndex:0];
+    }
+    if (buf0) [computeEncoder setBuffer:(__bridge id<MTLBuffer>)buf0 offset:0 atIndex:1];
+    if (buf1) [computeEncoder setBuffer:(__bridge id<MTLBuffer>)buf1 offset:0 atIndex:2];
+    if (buf2) [computeEncoder setBuffer:(__bridge id<MTLBuffer>)buf2 offset:0 atIndex:3];
+    
+    MTLSize threadsPerGrid = MTLSizeMake((NSUInteger)gridX, (NSUInteger)gridY, (NSUInteger)gridZ);
+    NSUInteger w = p.threadExecutionWidth;
+    NSUInteger h = MAX((NSUInteger)1, p.maxTotalThreadsPerThreadgroup / w);
+    MTLSize threadsPerThreadgroup = MTLSizeMake(w, h, 1);
+    [computeEncoder dispatchThreads:threadsPerGrid threadsPerThreadgroup:threadsPerThreadgroup];
+    [computeEncoder endEncoding];
+    [commandBuffer commit];
+    [commandBuffer waitUntilCompleted];
+    // Return first output buffer if provided; conventionally buf2 is output for 3-arg ops
+    if (buf2) {
+      id<MTLBuffer> o = (__bridge id<MTLBuffer>)buf2;
+      return o.contents;
+    }
+    return nil;
+  }
 }

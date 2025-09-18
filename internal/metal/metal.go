@@ -30,6 +30,13 @@ func Compile(metalSource string, kernelName string) {
 	C.initializePipelineAndCommandQueue(src, kernel)
 }
 
+// CompileLibraryFrom compiles the Metal source and initializes the library + queue (no specific kernel).
+func CompileLibraryFrom(metalSource string) {
+	src := C.CString(metalSource)
+	defer C.free(unsafe.Pointer(src))
+	C.initializeLibrary(src)
+}
+
 // InitializeBuffersFloat32 uploads A and B to GPU buffers and prepares the output buffer.
 func InitializeBuffersFloat32(a, b []float32, aRows, aCols, bRows, bCols int) (int, error) {
 	if len(a) != aRows*aCols {
